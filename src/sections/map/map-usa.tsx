@@ -23,6 +23,9 @@ function getColorForValue(value: number, min: number, max: number) {
 export default function MapUSA(_: Props) {
   const geoUrl = US_STATES_TOPOJSON
 
+  // Debug: set VITE_DEBUG_ONE_HEX=1 to render a single hex and log sample coords
+  const debugOneHex: boolean = ((import.meta as any).env?.VITE_DEBUG_ONE_HEX === '1') || ((import.meta as any).env?.VITE_DEBUG_ONE_HEX === 'true')
+
   const [hexFeatures, setHexFeatures] = useState<HexFeature[] | null>(null)
   const [fetchError, setFetchError] = useState<string | null>(null)
 
@@ -133,6 +136,32 @@ export default function MapUSA(_: Props) {
     return [min, max]
   }, [hexFeatures])
 
+  // DEV: log one sample point to ensure [lng,lat] and sane ranges
+  useEffect(() => {
+    if (!(import.meta as any).env?.DEV) return
+    if (!hexFeatures || hexFeatures.length === 0) return
+    const ring = hexFeatures[0]?.geometry?.coordinates?.[0]
+    const pt = Array.isArray(ring) && ring.length > 0 ? ring[0] : null
+    // Expected like [-122.4, 37.7]
+    console.log('[DEBUG] First hex point (lng,lat), ringLen:', pt, Array.isArray(ring) ? ring.length : 0)
+    if (pt) {
+      const [lng, lat] = pt
+      if (Math.abs(lng) > 180 || Math.abs(lat) > 90) {
+        console.warn('[DEBUG] Suspicious coord range (expect lng in -180..180, lat in -90..90):', pt)
+      }
+    }
+  }, [hexFeatures])
+
+  useEffect(() => {
+    if (!(import.meta as any).env?.DEV) return
+    console.log('[DEBUG] Value range:', { min: minVal, max: maxVal })
+  }, [minVal, maxVal])
+
+  const featsToRender = useMemo(() => {
+    if (!hexFeatures || hexFeatures.length === 0) return null as HexFeature[] | null
+    return debugOneHex ? [hexFeatures[0]] : hexFeatures
+  }, [hexFeatures, debugOneHex])
+
   const projectionConfig = useMemo(() => ({ scale: 800, center: [-96, 38] as [number, number] }), [])
 
   const legendStops = useMemo(() => {
@@ -225,8 +254,8 @@ export default function MapUSA(_: Props) {
           </Geographies>
 
           {/* Hexágonos del heatmap */}
-          {hexFeatures && hexFeatures.length > 0 && (
-            <Geographies geography={{ type: 'FeatureCollection', features: hexFeatures } as any}>
+          {featsToRender && featsToRender.length > 0 && (
+            <Geographies geography={{ type: 'FeatureCollection', features: featsToRender } as any}>
               {({ geographies }: any) =>
                 Array.isArray(geographies)
                   ? geographies.map((geo: any) => (
@@ -235,7 +264,7 @@ export default function MapUSA(_: Props) {
                         geography={geo}
                         fill={getColorForValue((geo as any).properties.value, minVal, maxVal)}
                         stroke="#ffffff88"
-                        strokeWidth={0.25}
+                        strokeWidth={debugOneHex ? 0.8 : 0.25}
                         style={{ default: { outline: 'none' }, hover: { outline: 'none', opacity: 0.9 }, pressed: { outline: 'none' } }}
                       />
                     ))
