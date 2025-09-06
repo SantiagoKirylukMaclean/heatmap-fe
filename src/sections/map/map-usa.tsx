@@ -1,27 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from 'react-simple-maps'
-import { cellToBoundary } from 'h3-js'
+import { apiConfig } from '../../config'
+import { asH3Index, buildHexFeature, sanitizePolygonFeature, type HexFeature, type H3Item } from './hex-helpers'
 
 // TopoJSON con los estados de USA (base map para contexto)
 const US_STATES_TOPOJSON = 'https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.json'
 
 interface Props {}
 
-interface H3Item {
-  h3Index?: string
-  index?: string
-  h3?: string
-  id?: string
-  hex?: string
-  value: number
-}
-
-interface HexFeatureProperties {
-  id: string
-  value: number
-}
-
-type HexFeature = GeoJSON.Feature<GeoJSON.Polygon, HexFeatureProperties>
 
 // Paleta tipo "plasma" (low -> high)
 const palette = ['#0d0887', '#5b02a3', '#9a179b', '#cb4679', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921', '#ffffe0']
@@ -33,19 +19,6 @@ function getColorForValue(value: number, min: number, max: number) {
   return palette[idx]
 }
 
-function asH3Index(item: H3Item): string | undefined {
-  return item.h3Index || item.index || item.h3 || item.hex || item.id
-}
-
-function toHexFeature(index: string, value: number): HexFeature {
-    // v4: si pones formatAsGeoJson=true te devuelve [lng,lat] y no hace falta invertir
-    const ring: [number, number][] = cellToBoundary(index, true) // [[lng,lat], ...]
-    return {
-        type: 'Feature',
-        properties: { id: index, value },
-        geometry: { type: 'Polygon', coordinates: [[...ring, ring[0]]] },
-    }
-}
 
 export default function MapUSA(_: Props) {
   const geoUrl = US_STATES_TOPOJSON
@@ -53,20 +26,56 @@ export default function MapUSA(_: Props) {
   const [hexFeatures, setHexFeatures] = useState<HexFeature[] | null>(null)
   const [fetchError, setFetchError] = useState<string | null>(null)
 
-  // Fetch de datos del backend
+  // Controles
+  const metricOptions = useMemo(() => ['price'], [])
+  const bucketOptions = useMemo(() => ['day', 'week', 'month'], [])
+  const dateOptions = useMemo(() => [
+    '2025-08-25',
+    '2025-08-24',
+    '2025-08-23',
+  ], [])
+
+  const [metric, setMetric] = useState<string>(metricOptions[0])
+  const [bucket, setBucket] = useState<string>(bucketOptions[0])
+  const [at, setAt] = useState<string>(dateOptions[0])
+
+  // Zoom y resolución H3
+  const [zoom, setZoom] = useState<number>(1)
+  const resolution = useMemo(() => {
+    // Mapear zoom -> resolución H3 (ajustable según necesidad)
+    if (zoom < 1.2) return 5
+    if (zoom < 2) return 6
+    if (zoom < 3) return 7
+    if (zoom < 4) return 8
+    if (zoom < 5) return 9
+    return 10
+  }, [zoom])
+
+  // Fetch de datos del backend con query params
   useEffect(() => {
+    const controller = new AbortController()
     let mounted = true
     async function load() {
       try {
         setFetchError(null)
-        const res = await fetch('http://localhost:8080/api/heatmap/h3')
+        const params = new URLSearchParams({
+          metric,
+          resolution: String(resolution),
+          bucket,
+          at,
+        })
+        const url = `${apiConfig.apiHost}/api/heatmap/h3?${params.toString()}`
+        const res = await fetch(url, { signal: controller.signal })
         if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = await res.json()
+        if (!mounted) return
 
         // Caso 1: FeatureCollection ya listo
         if (data && data.type === 'FeatureCollection') {
-          const feats: HexFeature[] = (data.features || []).filter((f: any) => f.geometry?.type === 'Polygon')
-          if (mounted) setHexFeatures(feats)
+          const feats: HexFeature[] = (data.features || [])
+            .map((f: any) => sanitizePolygonFeature(f))
+            .filter((f: HexFeature | null): f is HexFeature => !!f)
+          setHexFeatures(feats)
           return
         }
 
@@ -76,14 +85,16 @@ export default function MapUSA(_: Props) {
           for (const it of data as H3Item[]) {
             const idx = asH3Index(it)
             if (!idx || typeof it.value !== 'number') continue
-            feats.push(toHexFeature(idx, it.value))
+            const f = buildHexFeature(idx, it.value)
+            if (f) feats.push(f)
           }
-          if (mounted) setHexFeatures(feats)
+          setHexFeatures(feats)
           return
         }
 
         throw new Error('Formato de respuesta no soportado')
       } catch (e: any) {
+        if (e?.name === 'AbortError') return
         console.error('Error cargando heatmap:', e)
         if (!mounted) return
         setFetchError(e?.message || 'Fallo al cargar heatmap')
@@ -93,14 +104,21 @@ export default function MapUSA(_: Props) {
           { h3Index: '8928308280bffff', value: 2.8 },
           { h3Index: '8928308280dffff', value: 4.5 },
         ]
-        setHexFeatures(sample.map(s => toHexFeature(asH3Index(s)!, s.value)))
+        const feats = sample
+          .map(s => {
+            const idx = asH3Index(s)
+            return idx ? buildHexFeature(idx, s.value) : null
+          })
+          .filter((f: HexFeature | null): f is HexFeature => !!f)
+        setHexFeatures(feats)
       }
     }
     load()
     return () => {
       mounted = false
+      controller.abort()
     }
-  }, [])
+  }, [metric, bucket, at, resolution])
 
   // Extremos para la escala de color
   const [minVal, maxVal] = useMemo(() => {
@@ -128,6 +146,47 @@ export default function MapUSA(_: Props) {
 
   return (
     <div className="w-full">
+      {/* Controles */}
+      <div className="mb-3 flex flex-wrap items-center gap-3 text-sm">
+        <label className="flex items-center gap-2">
+          <span className="text-slate-600">Métrica</span>
+          <select
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+            value={metric}
+            onChange={e => setMetric(e.target.value)}
+          >
+            {metricOptions.map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="text-slate-600">Bucket</span>
+          <select
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+            value={bucket}
+            onChange={e => setBucket(e.target.value)}
+          >
+            {bucketOptions.map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </label>
+        <label className="flex items-center gap-2">
+          <span className="text-slate-600">Fecha</span>
+          <select
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-sm"
+            value={at}
+            onChange={e => setAt(e.target.value)}
+          >
+            {dateOptions.map(opt => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        </label>
+        <div className="ml-auto text-xs text-slate-500">res={resolution} • zoom={zoom.toFixed(2)}</div>
+      </div>
+
       <ComposableMap
         projection="geoAlbersUsa"
         projectionConfig={projectionConfig}
@@ -135,37 +194,52 @@ export default function MapUSA(_: Props) {
         height={550}
         style={{ width: '100%', height: 'auto' }}
       >
-        <ZoomableGroup zoom={1} minZoom={0.9} maxZoom={8} translateExtent={[[0, 0], [980, 550]]}>
+        <ZoomableGroup
+          center={[-96, 38]}
+          zoom={zoom}
+          onMoveEnd={(pos: any) => {
+            const raw = pos && typeof pos.zoom === 'number' && isFinite(pos.zoom) ? pos.zoom : zoom
+            const clamped = Math.max(0.9, Math.min(8, raw))
+            if (clamped !== zoom) setZoom(clamped)
+          }}
+          minZoom={0.9}
+          maxZoom={8}
+          translateExtent={[[0, 0], [980, 550]]}
+        >
           {/* Basemap de estados para referencia */}
           <Geographies geography={geoUrl}>
-            {({ geographies }) =>
-              geographies.map(geo => (
-                <Geography
-                  key={geo.rsmKey}
-                  geography={geo}
-                  fill="#f8fafc"
-                  stroke="#94a3b8"
-                  strokeWidth={0.5}
-                  style={{ default: { outline: 'none' }, hover: { outline: 'none' }, pressed: { outline: 'none' } }}
-                />
-              ))
+            {({ geographies }: any) =>
+              Array.isArray(geographies)
+                ? geographies.map((geo: any) => (
+                    <Geography
+                      key={geo.rsmKey}
+                      geography={geo}
+                      fill="#f8fafc"
+                      stroke="#94a3b8"
+                      strokeWidth={0.5}
+                      style={{ default: { outline: 'none' }, hover: { outline: 'none' }, pressed: { outline: 'none' } }}
+                    />
+                  ))
+                : null
             }
           </Geographies>
 
           {/* Hexágonos del heatmap */}
           {hexFeatures && hexFeatures.length > 0 && (
             <Geographies geography={{ type: 'FeatureCollection', features: hexFeatures } as any}>
-              {({ geographies }) =>
-                geographies.map(geo => (
-                  <Geography
-                    key={geo.rsmKey}
-                    geography={geo}
-                    fill={getColorForValue((geo as any).properties.value, minVal, maxVal)}
-                    stroke="#ffffff88"
-                    strokeWidth={0.25}
-                    style={{ default: { outline: 'none' }, hover: { outline: 'none', opacity: 0.9 }, pressed: { outline: 'none' } }}
-                  />
-                ))
+              {({ geographies }: any) =>
+                Array.isArray(geographies)
+                  ? geographies.map((geo: any) => (
+                      <Geography
+                        key={geo.rsmKey}
+                        geography={geo}
+                        fill={getColorForValue((geo as any).properties.value, minVal, maxVal)}
+                        stroke="#ffffff88"
+                        strokeWidth={0.25}
+                        style={{ default: { outline: 'none' }, hover: { outline: 'none', opacity: 0.9 }, pressed: { outline: 'none' } }}
+                      />
+                    ))
+                  : null
               }
             </Geographies>
           )}
