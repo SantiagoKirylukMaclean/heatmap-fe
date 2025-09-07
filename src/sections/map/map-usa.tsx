@@ -13,12 +13,14 @@ const US_STATES_TOPOJSON = 'https://cdn.jsdelivr.net/npm/us-atlas@3/states-10m.j
 interface Props {}
 
 
-// Paleta tipo "plasma" (low -> high)
-const palette = ['#0d0887', '#5b02a3', '#9a179b', '#cb4679', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921', '#ffffe0']
+// Paleta tipo "plasma" (low -> high), evitando terminación casi blanca
+const palette = ['#0d0887', '#5b02a3', '#9a179b', '#cb4679', '#ed7953', '#fb9f3a', '#fdca26', '#f0f921']
 
 function getColorForValue(value: number, min: number, max: number) {
   if (!isFinite(value) || max <= min) return '#e2e8f0'
-  const t = Math.min(1, Math.max(0, (value - min) / (max - min)))
+  // Clamp to avoid extremes mapping to near-black or near-white
+  const norm = (value - min) / (max - min)
+  const t = Math.min(0.93, Math.max(0.07, norm))
   const idx = Math.min(palette.length - 1, Math.floor(t * (palette.length - 1)))
   return palette[idx]
 }
@@ -37,9 +39,7 @@ export default function MapUSA(_: Props) {
   const metricOptions = useMemo(() => ['price'], [])
   const bucketOptions = useMemo(() => ['day', 'week', 'month'], [])
   const dateOptions = useMemo(() => [
-    '2025-08-25',
-    '2025-08-24',
-    '2025-08-23',
+    '2025-09-08',
   ], [])
 
   const [metric, setMetric] = useState<string>(metricOptions[0])
@@ -48,14 +48,20 @@ export default function MapUSA(_: Props) {
 
   // Zoom y resolución H3
   const [zoom, setZoom] = useState<number>(1)
+  const [center, setCenter] = useState<[number, number]>([-96, 38])
   const resolution = useMemo(() => {
-    // Mapear zoom -> resolución H3 (ajustable según necesidad)
+    // Mapear zoom -> resolución H3 (hasta r15)
     if (zoom < 1.2) return 5
-    if (zoom < 2) return 6
-    if (zoom < 3) return 7
-    if (zoom < 4) return 8
-    if (zoom < 5) return 9
-    return 10
+    if (zoom < 1.8) return 6
+    if (zoom < 2.4) return 7
+    if (zoom < 3.0) return 8
+    if (zoom < 3.6) return 9
+    if (zoom < 4.2) return 10
+    if (zoom < 5.0) return 11
+    if (zoom < 6.0) return 12
+    if (zoom < 7.2) return 13
+    if (zoom < 9.0) return 14
+    return 15
   }, [zoom])
 
   // Fetch de datos del backend con query params
@@ -127,7 +133,7 @@ export default function MapUSA(_: Props) {
     }
   }, [metric, bucket, at, resolution])
 
-  // Extremos para la escala de color
+  // Extremos para la escala de color de este lote
   const [minVal, maxVal] = useMemo(() => {
     if (!hexFeatures || hexFeatures.length === 0) return [0, 1]
     let min = Infinity
@@ -139,6 +145,23 @@ export default function MapUSA(_: Props) {
     }
     return [min, max]
   }, [hexFeatures])
+
+  // Dominio global (acumulado durante la sesión) para estabilizar color a través del zoom
+  const [globalDomain, setGlobalDomain] = useState<{ min: number; max: number } | null>(null)
+  useEffect(() => {
+    if (!hexFeatures || hexFeatures.length === 0) return
+    setGlobalDomain(prev => {
+      const next = { min: Math.min(prev?.min ?? Infinity, minVal), max: Math.max(prev?.max ?? -Infinity, maxVal) }
+      // Evita crear un nuevo objeto si no cambia
+      if (prev && prev.min === next.min && prev.max === next.max) return prev
+      return next
+    })
+  }, [hexFeatures, minVal, maxVal])
+  // Resetear dominio global cuando cambian los parámetros de métrica/agrupación/fecha
+  useEffect(() => { setGlobalDomain(null) }, [metric, bucket, at])
+
+  const domainMin = globalDomain?.min ?? minVal
+  const domainMax = globalDomain?.max ?? maxVal
 
   // DEV: log one sample point to ensure [lng,lat] and sane ranges
   useEffect(() => {
@@ -166,8 +189,8 @@ export default function MapUSA(_: Props) {
     return debugOneHex ? [hexFeatures[0]] : hexFeatures
   }, [hexFeatures, debugOneHex])
 
-  const minPolygonZoomByRes: Record<number, number> = { 5: 1.2, 6: 2, 7: 3, 8: 4, 9: 5, 10: 6 }
-  const usePolygons = zoom >= (minPolygonZoomByRes[resolution] ?? 3)
+  const minPolygonZoomByRes: Record<number, number> = { 5: 1.2, 6: 2, 7: 3, 8: 4, 9: 5, 10: 6, 11: 7, 12: 8, 13: 10, 14: 12, 15: 13 }
+  const usePolygons = true
 
   const projectionConfig = useMemo(() => ({ scale: 800, center: [-96, 38] as [number, number] }), [])
 
@@ -175,10 +198,10 @@ export default function MapUSA(_: Props) {
     const steps = palette.length
     const vals: number[] = []
     for (let i = 0; i < steps; i++) {
-      vals.push(minVal + ((maxVal - minVal) * i) / (steps - 1))
+      vals.push(domainMin + ((domainMax - domainMin) * i) / (steps - 1))
     }
     return vals
-  }, [minVal, maxVal])
+  }, [domainMin, domainMax])
 
   return (
     <div className="w-full">
@@ -231,15 +254,19 @@ export default function MapUSA(_: Props) {
         style={{ width: '100%', height: 'auto' }}
       >
         <ZoomableGroup
-          center={[-96, 38]}
+          center={center}
           zoom={zoom}
           onMoveEnd={(pos: any) => {
             const raw = pos && typeof pos.zoom === 'number' && isFinite(pos.zoom) ? pos.zoom : zoom
-            const clamped = Math.max(0.9, Math.min(8, raw))
+            const clamped = Math.max(0.9, Math.min(14, raw))
             if (clamped !== zoom) setZoom(clamped)
+            const coords = pos && Array.isArray(pos.coordinates) && isFinite(pos.coordinates[0]) && isFinite(pos.coordinates[1])
+              ? (pos.coordinates as [number, number])
+              : center
+            setCenter(coords)
           }}
           minZoom={0.9}
-          maxZoom={8}
+          maxZoom={14}
           translateExtent={[[0, 0], [980, 550]]}
         >
           {/* Basemap de estados para referencia */}
@@ -270,10 +297,10 @@ export default function MapUSA(_: Props) {
                         <Geography
                           key={geo.rsmKey}
                           geography={geo}
-                          fill={getColorForValue((geo as any).properties.value, minVal, maxVal)}
-                          stroke="#ffffff88"
+                          fill={getColorForValue((geo as any).properties.value, domainMin, domainMax)}
+                          stroke="#2563eb88"
                           strokeWidth={debugOneHex ? 0.8 : 0.25}
-                          style={{ default: { outline: 'none' }, hover: { outline: 'none', opacity: 0.9 }, pressed: { outline: 'none' } }}
+                          style={{ default: { outline: 'none', opacity: 1, fillOpacity: 1 }, hover: { outline: 'none', opacity: 0.95, fillOpacity: 1 }, pressed: { outline: 'none', opacity: 1, fillOpacity: 1 } }}
                         />
                       ))
                     : null
@@ -291,7 +318,7 @@ export default function MapUSA(_: Props) {
                   const sums = ringPts.reduce<[number, number]>((acc, [x, y]) => [acc[0] + x, acc[1] + y], [0, 0])
                   const cx = sums[0] / ringPts.length
                   const cy = sums[1] / ringPts.length
-                  const fill = getColorForValue(f.properties.value, minVal, maxVal)
+                  const fill = getColorForValue(f.properties.value, domainMin, domainMax)
                   return (
                     MarkerAny ? (
                       <MarkerAny key={`pt-${f.properties.id}-${i}`} coordinates={[cx, cy] as [number, number]}>
@@ -316,7 +343,7 @@ export default function MapUSA(_: Props) {
           <span key={i} className="h-3 w-6 rounded" style={{ backgroundColor: c }} title={`${legendStops[i]?.toFixed(2) ?? ''}`} />
         ))}
         <span className="ml-2 text-[10px] text-slate-500">
-          {minVal.toFixed(2)} — {maxVal.toFixed(2)}
+          {domainMin.toFixed(2)} — {domainMax.toFixed(2)}
         </span>
       </div>
 
