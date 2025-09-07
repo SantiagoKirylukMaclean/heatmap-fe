@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from 'react'
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from 'react-simple-maps'
 import * as RSM from 'react-simple-maps'
 import { apiConfig } from '../../config'
+import { polygonToCells } from 'h3-js'
+import { feature as topojsonFeature } from 'topojson-client'
 
 // react-simple-maps typings in this version might not export Marker; use any-typed alias if present at runtime.
 const MarkerAny: any = (RSM as any)?.Marker
@@ -25,6 +27,14 @@ function getColorForValue(value: number, min: number, max: number) {
   return palette[idx]
 }
 
+function valueFromCell(id: string): number {
+  // Deterministic pseudo-random value based on cell id for demo coloring
+  let h = 0
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0
+  const t = (h >>> 0) / 0xffffffff
+  return 10 + 90 * t // 10..100
+}
+
 
 export default function MapUSA(_: Props) {
   const geoUrl = US_STATES_TOPOJSON
@@ -34,6 +44,7 @@ export default function MapUSA(_: Props) {
 
   const [hexFeatures, setHexFeatures] = useState<HexFeature[] | null>(null)
   const [fetchError, setFetchError] = useState<string | null>(null)
+  const [njGeo, setNjGeo] = useState<any | null>(null)
 
   // Controles
   const metricOptions = useMemo(() => ['price'], [])
@@ -48,24 +59,63 @@ export default function MapUSA(_: Props) {
 
   // Zoom y resolución H3
   const [zoom, setZoom] = useState<number>(1)
-  const [center, setCenter] = useState<[number, number]>([-96, 38])
+  const [center, setCenter] = useState<[number, number]>([-74.7, 40.1])
   const resolution = useMemo(() => {
-    // Mapear zoom -> resolución H3 (hasta r15)
-    if (zoom < 1.2) return 5
-    if (zoom < 1.8) return 6
-    if (zoom < 2.4) return 7
-    if (zoom < 3.0) return 8
-    if (zoom < 3.6) return 9
-    if (zoom < 4.2) return 10
-    if (zoom < 5.0) return 11
-    if (zoom < 6.0) return 12
-    if (zoom < 7.2) return 13
-    if (zoom < 9.0) return 14
+    // LOD: no permitir res=8 hasta zoom >= 5.5; por debajo usar 6/7
+    if (zoom < 2.8) return 6
+    if (zoom < 5.5) return 7
+    if (zoom < 6.2) return 8
+    if (zoom < 7.0) return 9
+    if (zoom < 8.0) return 10
+    if (zoom < 9.0) return 11
+    if (zoom < 10.0) return 12
+    if (zoom < 11.5) return 13
+    if (zoom < 13.0) return 14
     return 15
   }, [zoom])
 
-  // Fetch de datos del backend con query params
+  // Cargar polígono de New Jersey desde us-atlas y guardarlo como GeoJSON geometry
   useEffect(() => {
+    let mounted = true
+    async function loadNJ() {
+      try {
+        const res = await fetch(US_STATES_TOPOJSON)
+        const topo = await res.json()
+        const statesFc: any = topojsonFeature(topo, (topo as any).objects.states)
+        const njFeat = Array.isArray(statesFc?.features)
+          ? statesFc.features.find((f: any) => f?.id === 34 || f?.id === '34' || f?.properties?.name === 'New Jersey')
+          : null
+        if (mounted && njFeat?.geometry) {
+          setNjGeo(njFeat.geometry)
+          // Centrar cerca de NJ si estamos en el centro USA
+          setCenter([-74.7, 40.1])
+        }
+      } catch (e) {
+        console.warn('No se pudo cargar NJ desde us-atlas:', e)
+      }
+    }
+    loadNJ()
+    return () => { mounted = false }
+  }, [])
+
+  // Cuando hay NJ geometry, generar celdas H3 desde el polígono (MultiPolygon) con la resolución actual
+  useEffect(() => {
+    if (!njGeo) return
+    try {
+      const cells = polygonToCells((njGeo as any).coordinates, resolution, true) as any[]
+      const uniq = Array.from(new Set(cells)) as string[]
+      const feats: HexFeature[] = uniq
+        .map((id) => buildHexFeature(id, valueFromCell(id)))
+        .filter((f: HexFeature | null): f is HexFeature => !!f)
+      setHexFeatures(feats)
+    } catch (e) {
+      console.error('Error generando celdas H3 para NJ:', e)
+    }
+  }, [njGeo, resolution])
+
+  // Fetch de datos del backend con query params (desactivado cuando usamos NJ polygon)
+  useEffect(() => {
+    if (njGeo) return
     const controller = new AbortController()
     let mounted = true
     async function load() {
@@ -190,7 +240,7 @@ export default function MapUSA(_: Props) {
   }, [hexFeatures, debugOneHex])
 
   const minPolygonZoomByRes: Record<number, number> = { 5: 1.2, 6: 2, 7: 3, 8: 4, 9: 5, 10: 6, 11: 7, 12: 8, 13: 10, 14: 12, 15: 13 }
-  const usePolygons = true
+  const usePolygons = zoom >= 5.5
 
   const projectionConfig = useMemo(() => ({ scale: 800, center: [-96, 38] as [number, number] }), [])
 
