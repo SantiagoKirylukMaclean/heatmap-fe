@@ -8,7 +8,7 @@ function isFinitePair(pt) {
 
 function validateCell(cell) {
   try {
-    const ring = cellToBoundary(cell, true)
+    const ring = cellToBoundary(cell, 'geojson')
     if (!Array.isArray(ring) || ring.length < 3) return { ok: false, reason: 'ring-too-short' }
     const filtered = ring.filter(isFinitePair)
     if (filtered.length !== ring.length) return { ok: false, reason: 'non-finite-coords' }

@@ -1,6 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { ComposableMap, Geographies, Geography, ZoomableGroup } from 'react-simple-maps'
+import * as RSM from 'react-simple-maps'
 import { apiConfig } from '../../config'
+
+// react-simple-maps typings in this version might not export Marker; use any-typed alias if present at runtime.
+const MarkerAny: any = (RSM as any)?.Marker
 import { asH3Index, buildHexFeature, sanitizePolygonFeature, type HexFeature, type H3Item } from './hex-helpers'
 
 // TopoJSON con los estados de USA (base map para contexto)
@@ -162,6 +166,9 @@ export default function MapUSA(_: Props) {
     return debugOneHex ? [hexFeatures[0]] : hexFeatures
   }, [hexFeatures, debugOneHex])
 
+  const minPolygonZoomByRes: Record<number, number> = { 5: 1.2, 6: 2, 7: 3, 8: 4, 9: 5, 10: 6 }
+  const usePolygons = zoom >= (minPolygonZoomByRes[resolution] ?? 3)
+
   const projectionConfig = useMemo(() => ({ scale: 800, center: [-96, 38] as [number, number] }), [])
 
   const legendStops = useMemo(() => {
@@ -255,22 +262,50 @@ export default function MapUSA(_: Props) {
 
           {/* Hexágonos del heatmap */}
           {featsToRender && featsToRender.length > 0 && (
-            <Geographies geography={{ type: 'FeatureCollection', features: featsToRender } as any}>
-              {({ geographies }: any) =>
-                Array.isArray(geographies)
-                  ? geographies.map((geo: any) => (
-                      <Geography
-                        key={geo.rsmKey}
-                        geography={geo}
-                        fill={getColorForValue((geo as any).properties.value, minVal, maxVal)}
-                        stroke="#ffffff88"
-                        strokeWidth={debugOneHex ? 0.8 : 0.25}
-                        style={{ default: { outline: 'none' }, hover: { outline: 'none', opacity: 0.9 }, pressed: { outline: 'none' } }}
-                      />
-                    ))
-                  : null
-              }
-            </Geographies>
+            usePolygons ? (
+              <Geographies geography={{ type: 'FeatureCollection', features: featsToRender } as any}>
+                {({ geographies }: any) =>
+                  Array.isArray(geographies)
+                    ? geographies.map((geo: any) => (
+                        <Geography
+                          key={geo.rsmKey}
+                          geography={geo}
+                          fill={getColorForValue((geo as any).properties.value, minVal, maxVal)}
+                          stroke="#ffffff88"
+                          strokeWidth={debugOneHex ? 0.8 : 0.25}
+                          style={{ default: { outline: 'none' }, hover: { outline: 'none', opacity: 0.9 }, pressed: { outline: 'none' } }}
+                        />
+                      ))
+                    : null
+                }
+              </Geographies>
+            ) : (
+              <>
+                {featsToRender.map((f, i) => {
+                  const ring = (f.geometry?.coordinates?.[0] as [number, number][]) || []
+                  if (!Array.isArray(ring) || ring.length === 0) return null
+                  const first = ring[0]
+                  const last = ring[ring.length - 1]
+                  const ringPts = (first && last && first[0] === last[0] && first[1] === last[1]) ? ring.slice(0, -1) : ring
+                  if (ringPts.length === 0) return null
+                  const sums = ringPts.reduce<[number, number]>((acc, [x, y]) => [acc[0] + x, acc[1] + y], [0, 0])
+                  const cx = sums[0] / ringPts.length
+                  const cy = sums[1] / ringPts.length
+                  const fill = getColorForValue(f.properties.value, minVal, maxVal)
+                  return (
+                    MarkerAny ? (
+                      <MarkerAny key={`pt-${f.properties.id}-${i}`} coordinates={[cx, cy] as [number, number]}>
+                        <circle r={2.2} fill={fill} stroke="#ffffff88" strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
+                      </MarkerAny>
+                    ) : (
+                      <g key={`pt-${f.properties.id}-${i}`} transform={`translate(${cx},${cy})`}>
+                        <circle r={2.2} fill={fill} stroke="#ffffff88" strokeWidth={0.5} vectorEffect="non-scaling-stroke" />
+                      </g>
+                    )
+                  )
+                })}
+              </>
+            )
           )}
         </ZoomableGroup>
       </ComposableMap>

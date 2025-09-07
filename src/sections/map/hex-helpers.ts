@@ -31,14 +31,22 @@ function isFinitePair(pt: any): pt is [number, number] {
 }
 
 function shouldSwapLngLat(ring: [number, number][]): boolean {
-  // Heurística: si la mayoría de puntos parecen [lat, lng] (|x|<=90 y |y|<=180), invertimos
-  let swapVotes = 0
+  // Si el primer componente se parece a latitud (<=90) y el segundo a longitud (>90 a menudo),
+  // asumimos [lat,lng] y hacemos swap. Usamos promedio para ser robustos.
+  let sumAbsX = 0
+  let sumAbsY = 0
+  let n = 0
   for (const [x, y] of ring) {
-    const looksLatLng = Math.abs(x) <= 90 && Math.abs(y) <= 180
-    const looksLngLat = Math.abs(x) <= 180 && Math.abs(y) <= 90
-    if (looksLatLng && !looksLngLat) swapVotes++
+    if (isFinite(x) && isFinite(y)) {
+      sumAbsX += Math.abs(x)
+      sumAbsY += Math.abs(y)
+      n++
+    }
   }
-  return swapVotes > ring.length / 2
+  if (n === 0) return false
+  const avgX = sumAbsX / n
+  const avgY = sumAbsY / n
+  return avgX <= 90 && avgY > 90
 }
 
 function normalizeLngLat(ring: [number, number][]): [number, number][] {
@@ -73,7 +81,8 @@ function ensureCCW(ring: [number, number][]): [number, number][] {
 
 export function buildHexFeature(index: string, value: number): HexFeature | null {
   try {
-    const raw: [number, number][] = cellToBoundary(index, true as any)
+    // h3-js v4: use 'geojson' to get [lng, lat] directly
+    const raw: [number, number][] = cellToBoundary(index, 'geojson' as any)
     if (!Array.isArray(raw) || raw.length < 3) return null
     const filtered = raw.filter(isFinitePair)
     if (filtered.length < 3) return null
