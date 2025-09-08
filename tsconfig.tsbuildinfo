@@ -1,1 +1,1 @@
-{"root":["./src/config.ts","./src/main.tsx","./src/root-app.tsx","./src/sections/map/hex-helpers.ts","./src/sections/map/map-usa.tsx","./src/sections/map/map-webgl.tsx","./src/types/react-simple-maps.d.ts","./src/types/topojson-client.d.ts"],"version":"5.6.2"}
+{"root":["./src/config.ts","./src/main.tsx","./src/root-app.tsx","./src/sections/map/hex-helpers.ts","./src/sections/map/map-webgl.tsx","./src/types/react-simple-maps.d.ts","./src/types/topojson-client.d.ts"],"version":"5.6.2"}
